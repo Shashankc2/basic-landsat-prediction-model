@@ -1,0 +1,12 @@
+# Data files (Too big for GitHub)
+*.parquet
+*.zip
+*.csv
+
+# Python/System junk
+__pycache__/
+.DS_Store
+.ipynb_checkpoints/
+
+# Plots (You'll regenerate these)
+*.png
