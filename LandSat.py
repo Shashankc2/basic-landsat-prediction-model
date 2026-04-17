@@ -73,10 +73,21 @@ results_df = pd.DataFrame(results)
 
 print("\n" + "="*40)
 print("--- OVERALL SUMMARY STATISTICS ---")
-print("="*40)
-print(f"Mean Training R^2:        {results_df['train_r2'].mean():.4f}  (Memorization)")
-print(f"Mean Holdout R^2:         {results_df['test_r2_holdout'].mean():.4f}  (Generalization)")
-print(f"Mean Other Countries R^2: {results_df['test_r2_other'].mean():.4f}  (Future Forecasting)")
-print("-" * 40)
-print(f"Average Generalization Gap: {results_df['train_r2'].mean() - results_df['test_r2_holdout'].mean():.4f}")
-print("="*40)
+# 1. Median Metrics 
+print(f"Median Training R^2:      {results_df['train_r2'].median():.4f}")
+print(f"Median Holdout R^2:       {results_df['test_r2_holdout'].median():.4f}")
+print(f"Median Other R^2:         {results_df['test_r2_other'].median():.4f}")
+
+print("-" * 50)
+
+# 2. Mean Metrics 
+print(f"Mean Training R^2:        {results_df['train_r2'].mean():.4f}")
+print(f"Mean Holdout R^2:         {results_df['test_r2_holdout'].mean():.4f}")
+print(f"Mean Other R^2:           {results_df['test_r2_other'].mean():.4f}")
+
+print("-" * 50)
+
+
+gap = results_df['train_r2'].median() - results_df['test_r2_holdout'].median()
+print(f"Median Generalization Gap: {gap:.4f}")
+print("="*50)
