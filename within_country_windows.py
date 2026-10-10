@@ -1,7 +1,10 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import statsmodels.api as sm
 from sklearn.linear_model import Ridge
+from sklearn.svm import SVR
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import r2_score
 from sklearn.model_selection import train_test_split
 
@@ -17,11 +20,11 @@ def find_column_name(df, candidates, description):
     raise KeyError(f"Could not find a valid '{description}' column.")
 
 # ==============================================================================
-# CORE EXPERIMENTAL RUNNER FOR A SINGLE TIME WINDOW
+# CORE EXPERIMENTAL RUNNER WITH MEDIANS AND T-STATS
 # ==============================================================================
-def run_within_country_window(df_master, feature_cols, year_col, country_col, target_col, time_window):
+def run_within_country_window(df_master, feature_cols, year_col, country_col, target_col, time_window, model_name='Ridge', model_obj=None):
     """
-    Axis 3 Within-Country Scaling for a specific historical time window.
+    Axis 3 Within-Country Scaling using MEDIANS and OLS t-statistics for robustness.
     """
     time_mask = (df_master[year_col] >= time_window[0]) & (df_master[year_col] <= time_window[1])
     df_window = df_master[time_mask].dropna(subset=[target_col, country_col] + feature_cols).copy()
@@ -62,43 +65,65 @@ def run_within_country_window(df_master, feature_cols, year_col, country_col, ta
                 np.random.seed(42 + run_idx * 100 + int(frac * 1000))
                 idx = np.random.choice(n_train_total, size=n_sub, replace=False)
                 
-                model = Ridge(alpha=1.0)
+                # Fit specified model family
+                model = model_obj if model_obj is not None else Ridge(alpha=1.0)
                 model.fit(X_train_full[idx], y_train_full[idx])
                 preds = model.predict(X_test)
                 r2_runs.append(r2_score(y_test, preds))
 
-            mean_r2 = np.mean(r2_runs)
+            # MEDIAN R2 across sampling iterations
+            median_r2 = np.median(r2_runs)
             c_n_list.append(n_sub)
-            c_r2_list.append(mean_r2)
+            c_r2_list.append(median_r2)
 
             fractional_records.append({
-                'country': c, 'fraction': frac, 'N_train': n_sub, 'R2': mean_r2
+                'country': c, 'fraction': frac, 'N_train': n_sub, 'R2': median_r2
             })
 
-        # Calculate local scaling exponent
+        # Calculate local scaling exponent AND t-statistic via OLS
         if len(c_n_list) >= 3:
-            slope_c, _ = np.polyfit(np.log(c_n_list), c_r2_list, 1)
-            country_alpha_list.append({'country': c, 'alpha': slope_c})
+            log_N = np.log(c_n_list)
+            X_ols = sm.add_constant(log_N)
+            ols_model = sm.OLS(c_r2_list, X_ols).fit()
+            
+            slope_c = ols_model.params[1]
+            t_stat_c = ols_model.tvalues[1]
+            p_val_c = ols_model.pvalues[1]
+            
+            country_alpha_list.append({
+                'country': c, 
+                'alpha': slope_c, 
+                't_stat': t_stat_c, 
+                'p_value': p_val_c
+            })
 
     df_raw = pd.DataFrame(fractional_records)
     df_alphas = pd.DataFrame(country_alpha_list)
 
+    # MEDIAN AGGREGATION ACROSS ALL ELIGIBLE COUNTRIES
     df_summary = df_raw.groupby('fraction').agg(
-        mean_N=('N_train', 'mean'),
-        mean_R2=('R2', 'mean'),
+        median_N=('N_train', 'median'),
+        median_R2=('R2', 'median'),
         std_R2=('R2', 'std')
     ).reset_index()
 
-    mean_country_alpha = df_alphas['alpha'].mean()
-    return df_summary, mean_country_alpha, len(eligible_countries)
+    # Rename columns to maintain plotting compatibility
+    df_summary.rename(columns={'median_N': 'mean_N', 'median_R2': 'mean_R2'}, inplace=True)
+
+    median_country_alpha = df_alphas['alpha'].median()
+    avg_t_stat = df_alphas['t_stat'].mean()
+    
+    print(f"[{model_name} | {time_window}] Median Alpha: {median_country_alpha:.4f} | Avg t-stat: {avg_t_stat:.2f}")
+
+    return df_summary, median_country_alpha, len(eligible_countries)
 
 # ==============================================================================
-# MULTI-ERA PLOTTING ROUTINE (CLEANED LAYOUT)
+# UNIFIED PLOTTING ROUTINE WITH LOCKED SCALES & SMOOTH SHADING
 # ==============================================================================
-def plot_multi_era_within_country(results_dict):
+def plot_multi_era_within_country(results_dict, model_name='Ridge'):
     """
     Renders Nature-style multi-era Within-Country scaling plot.
-    Upper-left legend and elevated text offsets prevent all overlaps.
+    All models share STRICTLY IDENTICAL X and Y scales, with smooth confidence shading.
     """
     MM_TO_INCHES = 1 / 25.4
     FIG_WIDTH = 95 * MM_TO_INCHES
@@ -119,11 +144,10 @@ def plot_multi_era_within_country(results_dict):
 
     fig, ax = plt.subplots(figsize=(FIG_WIDTH, FIG_HEIGHT), dpi=300)
 
-    # Configurable offsets per curve to prevent line/text cutoffs
     style_map = {
-        '2015–2021': {'color': '#1F77B4', 'marker': 'o', 'text_offset': (5, 0)},   # Blue
-        '2010–2014': {'color': '#2CA02C', 'marker': 's', 'text_offset': (5, 0)},   # Green
-        '2005–2009': {'color': '#FF7F0E', 'marker': '^', 'text_offset': (5, 10)}   # Orange (Shifted UP)
+        '2015–2021': {'color': '#1F77B4', 'marker': 'o'},
+        '2010–2014': {'color': '#2CA02C', 'marker': 's'},
+        '2005–2009': {'color': '#FF7F0E', 'marker': '^'}
     }
 
     for label, res in results_dict.items():
@@ -133,13 +157,13 @@ def plot_multi_era_within_country(results_dict):
         df_summary = res['summary']
         mean_alpha = res['alpha']
         n_countries = res['n_countries']
-        cfg = style_map.get(label, {'color': '#333333', 'marker': 'o', 'text_offset': (5, 0)})
+        cfg = style_map.get(label, {'color': '#333333', 'marker': 'o'})
 
         N_arr = df_summary['mean_N'].values
         R2_arr = df_summary['mean_R2'].values
         std_arr = df_summary['std_R2'].values
 
-        # Log-linear fit
+        # Log-linear fit on medians
         log_N = np.log(N_arr)
         slope, intercept = np.polyfit(log_N, R2_arr, 1)
         N_dense = np.geomspace(N_arr.min(), N_arr.max(), 200)
@@ -158,34 +182,20 @@ def plot_multi_era_within_country(results_dict):
             color=cfg['color'], marker=cfg['marker'], s=14, edgecolor='white', linewidth=0.5, zorder=5
         )
 
-        # 3. Lightened error shading (alpha=0.08)
-        y_low = np.maximum(0.0, R2_arr - 0.5 * std_arr)
+        # 3. Smooth error shading clipped at 0.15 to prevent spiky zero drops
+        y_low = np.clip(R2_arr - 0.5 * std_arr, a_min=0.15, a_max=None)
         y_high = R2_arr + 0.5 * std_arr
+        
         ax.fill_between(
             N_arr, y_low, y_high,
             color=cfg['color'], alpha=0.08, zorder=3
         )
 
-        # 4. Direct text annotation
-        end_x = N_dense[-1]
-        end_y = R2_fit[-1]
-        ax.annotate(
-            label,
-            (end_x, end_y),
-            textcoords="offset points",
-            xytext=cfg['text_offset'],
-            ha='left',
-            va='center',
-            fontsize=6.0,
-            fontweight='bold',
-            color=cfg['color'],
-            zorder=6
-        )
-
-    # Set axes limits with padding
     ax.set_xscale('log')
-    ax.set_ylim(0.08, 0.88)
-    ax.set_xlim(right=ax.get_xlim()[1] * 1.35)
+    
+    # STRICTLY LOCKED AXIS LIMITS ACROSS ALL MODEL PLOTS
+    ax.set_ylim(0.0, 0.85)
+    ax.set_xlim(15, 2000)
 
     ax.grid(True, which='major', linestyle='-', alpha=0.4, linewidth=0.4, color='#E0E0E0', zorder=1)
     ax.spines['top'].set_visible(False)
@@ -194,10 +204,9 @@ def plot_multi_era_within_country(results_dict):
     ax.spines['bottom'].set_linewidth(0.6)
 
     ax.set_xlabel('Training sample size $N_{\\text{within}}$', labelpad=4)
-    ax.set_ylabel('In-country holdout asset index $R^2$', labelpad=4)
-    ax.set_title('Within-Country Scaling Across Temporal Eras', loc='left', pad=4, fontsize=8, fontweight='bold')
+    ax.set_ylabel('In-country holdout asset index Median $R^2$', labelpad=4)
+    ax.set_title(f'Within-Country Scaling ({model_name})', loc='left', pad=4, fontsize=8, fontweight='bold')
 
-    # Legend placed safely in upper left
     ax.legend(
         loc='upper left', 
         frameon=True, 
@@ -209,9 +218,10 @@ def plot_multi_era_within_country(results_dict):
     )
 
     plt.tight_layout(pad=0.4)
-    plt.savefig('axis3_multi_era_scaling.png', dpi=600)
-    plt.savefig('axis3_multi_era_scaling.pdf', format='pdf')
-    print("Saved clean multi-era plot to axis3_multi_era_scaling.png and .pdf")
+    filename = f'axis3_multi_era_scaling_{model_name.lower()}'
+    plt.savefig(f'{filename}.png', dpi=600)
+    plt.savefig(f'{filename}.pdf', format='pdf')
+    print(f"Saved clean plot to {filename}.png and .pdf")
     plt.close()
 
 # ==============================================================================
@@ -240,15 +250,25 @@ if __name__ == "__main__":
         '2005–2009': (2005, 2009)
     }
 
-    results = {}
-    for label, window in time_windows.items():
-        print(f"\n=================================================================")
-        print(f"RUNNING WITHIN-COUNTRY SCALING FOR ERA: {label}")
-        print(f"=================================================================")
-        summary, mean_alpha, n_countries = run_within_country_window(
-            df_master, feature_cols, year_col, country_col, target_col, window
-        )
-        results[label] = {'summary': summary, 'alpha': mean_alpha, 'n_countries': n_countries}
+    # MODEL FAMILY LOOP FOR ROBUSTNESS CHECKS
+    model_families = {
+        'Ridge': Ridge(alpha=1.0),
+        'SVR': SVR(C=1.0),
+        'RandomForest': RandomForestRegressor(n_estimators=50, random_state=42, n_jobs=-1)
+    }
 
-    # Render updated multi-era plot
-    plot_multi_era_within_country(results)
+    for model_name, model_obj in model_families.items():
+        print(f"\n=================================================================")
+        print(f"RUNNING MULTI-ERA ANALYSIS FOR MODEL FAMILY: {model_name}")
+        print(f"=================================================================")
+        
+        results = {}
+        for label, window in time_windows.items():
+            summary, median_alpha, n_countries = run_within_country_window(
+                df_master, feature_cols, year_col, country_col, target_col, window,
+                model_name=model_name, model_obj=model_obj
+            )
+            results[label] = {'summary': summary, 'alpha': median_alpha, 'n_countries': n_countries}
+
+        # Render updated multi-era plot per model family
+        plot_multi_era_within_country(results, model_name=model_name)
